@@ -1,41 +1,19 @@
-"""Fetch the mugshot for an NCDPS-convicted offender.
-
-Strategy:
-    1. Hit the offender view page for the offender's OPUS ID.
-       https://webapps.doc.state.nc.us/opi/viewoffender.do
-            ?method=view&offenderID=<opus_id>
-    2. Scrape the page for the `<img src="...">` of the mugshot.
-       NCDPS serves photos from `offphoto/<opus_id>.jpg`.
-    3. Download the image to projects/<slug>/visuals/source_images/.
-
-Returns the absolute path of the downloaded image, or None if no photo
-is available for this offender (some records lack a photo).
-"""
+"""Scrape NCDPS mugshots from the public view-offender pages."""
 
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
+}
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
-
-UA = ("VideoEssaysVerdict/1.0 (https://github.com/smanderson721/"
-      "federal-indictments; mugshot fetcher)")
-HEADERS = {"User-Agent": UA}
-
-VIEW_URL = ("https://webapps.doc.state.nc.us/opi/viewoffender.do"
-            "?method=view&offenderID={opus_id}")
-# Direct image URLs NCDPS commonly serves under
-_IMAGE_CANDIDATES = [
-    "https://webapps.doc.state.nc.us/opi/offphoto/{opus_id}.jpg",
-    "https://webapps.doc.state.nc.us/opi/offphoto/{opus_id}_HEAD.jpg",
-    "https://opus.doc.state.nc.us/photos/{opus_id}.jpg",
-]
 
 
 def _try_get(url: str, timeout: float = 20.0) -> bytes | None:
@@ -46,14 +24,15 @@ def _try_get(url: str, timeout: float = 20.0) -> bytes | None:
             if r.status_code != 200:
                 return None
             ctype = r.headers.get("content-type", "").lower()
-            # Accept image responses only.
             if not ctype.startswith("image/"):
                 return None
             data = r.content
-            # Reject NCDPS's silhouette placeholder (served when no photo
-            # exists, e.g. for juvenile offenders). It's a small GIF.
-            if len(data) < 4000 and (data[:6] == b"GIF89a"
-                                     or data[:6] == b"GIF87a"):
+            # Reject GIF placeholders (silhouette.gif, spacer, etc).
+            if (len(data) < 5000 and (data[:6] == b"GIF89a"
+                                      or data[:6] == b"GIF87a")):
+                return None
+            # Reject NCDPS "No Photo Available" JPEG placeholder.
+            if _is_no_photo_placeholder(data):
                 return None
             return data
     except Exception as e:
@@ -62,29 +41,75 @@ def _try_get(url: str, timeout: float = 20.0) -> bytes | None:
 
 
 def _is_silhouette(src: str) -> bool:
+    """Check if a URL or path looks like a silhouette/placeholder image."""
     s = src.lower()
-    return ("silhouette" in s
-            or "spacertbl" in s   # NCDPS layout spacer image
-            or s.endswith("/find.ico")
-            or s.endswith(".gif"))   # all real mugshots are JPEG
+    return (
+        "silhouette" in s
+        or "spacertbl" in s
+        or s.endswith("/find.ico")
+        or s.endswith(".gif")
+    )
 
 
-def _scrape_view_page_for_image(opus_id: str) -> Optional[str]:
-    url = VIEW_URL.format(opus_id=opus_id)
+def _is_no_photo_placeholder(data: bytes) -> bool:
+    """Detect NCDPS 'No Photo Available' JPEG placeholder.
+    
+    The placeholder is a 240x240 JPEG (~4.8 KB). Real mugshots are 
+    typically larger (400x500+ pixels). We check JPEG dimensions via
+    the SOF marker.
+    """
+    if len(data) < 4500 or len(data) > 6000:
+        return False
     try:
+        # Must be JPEG (starts with FFD8)
+        if data[:2] != b"\xff\xd8":
+            return False
+        # Find Start-of-Frame (SOF0: FFC0, SOF1: FFC1, SOF2: FFC2, etc.)
+        # SOF marker is at offset, followed by length (2 bytes), then:
+        #   precision (1 byte), height (2 bytes), width (2 bytes)
+        i = 2
+        while i < len(data) - 8:
+            if data[i:i+1] != b"\xff":
+                i += 1
+                continue
+            marker = data[i+1:i+2]
+            # SOF markers are C0-C3, C5-C7, C9-CB, CD-CF
+            if marker[0:1] in (b"\xc0", b"\xc1", b"\xc2", b"\xc3",
+                               b"\xc5", b"\xc6", b"\xc7",
+                               b"\xc9", b"\xca", b"\xcb",
+                               b"\xcd", b"\xce", b"\xcf"):
+                # Extract height and width
+                # Skip marker (2) + length (2) + precision (1)
+                height = int.from_bytes(data[i+5:i+7], "big")
+                width = int.from_bytes(data[i+7:i+9], "big")
+                # Placeholder is always 240x240; real mugshots are 400+ pixels
+                return height == 240 and width == 240
+            i += 1
+    except Exception:
+        pass
+    return False
+
+
+def _scrape_view_page_for_image(opus_id: str) -> str | None:
+    """Fetch the NCDPS view-offender page and extract the image URL."""
+    try:
+        url = (
+            f"https://webapps.doc.state.nc.us/opi/viewoffender.do?"
+            f"method=view&offenderID={opus_id}"
+        )
         with httpx.Client(headers=HEADERS, follow_redirects=True,
                           timeout=20.0) as c:
             r = c.get(url)
-            r.raise_for_status()
+            if r.status_code != 200:
+                return None
             html = r.text
     except Exception as e:
-        print(f"  [mugshot-nc] view page fetch failed: {e}", flush=True)
+        print(f"  [mugshot-nc] viewoffender page fetch failed: {e}",
+              flush=True)
         return None
 
-    # Look for any <img src> referencing the opus id or "photo".
-    # We deliberately skip silhouette / spacer / icon images so that
-    # juvenile / no-photo offenders return None and the case can be
-    # filtered out upstream.
+    # Look for any <img src> that references the opus id or "photo".
+    # We deliberately skip silhouette / spacer / icon images.
     candidates = re.findall(r'<img[^>]+src="([^"]+)"', html, re.IGNORECASE)
     for src in candidates:
         if _is_silhouette(src):
@@ -108,44 +133,36 @@ def _scrape_view_page_for_image(opus_id: str) -> Optional[str]:
     return None
 
 
-def fetch_ncdps_mugshot(opus_id: str, out_path: Path,
-                        *, force: bool = False) -> Optional[Path]:
-    """Locate and download the NCDPS mugshot for `opus_id`. Returns the
-    absolute output path, or None on failure. Cached on disk."""
+def fetch_ncdps_mugshot(opus_id: str, out_path: Path | str, *,
+                        force: bool = False) -> Path | None:
+    """Download a mugshot from NCDPS for the given opus_id.
+    
+    Returns the output path if successful, None if:
+      - No image found on the view page
+      - Only placeholder images available
+      - Download failed
+    
+    Args:
+        opus_id: NCDPS offender ID (7 digits)
+        out_path: Where to save the mugshot
+        force: Re-download even if file exists
+    
+    Returns:
+        Path to the saved mugshot, or None
+    """
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists() and not force:
-        return out_path.resolve()
-
-    print(f"  [mugshot-nc] fetching photo for OPUS {opus_id}", flush=True)
-
-    # 1. Try the canonical photo URLs directly.
-    for tmpl in _IMAGE_CANDIDATES:
-        url = tmpl.format(opus_id=opus_id)
-        data = _try_get(url)
-        if data:
-            out_path.write_bytes(data)
-            print(f"  [mugshot-nc] direct → {url}", flush=True)
-            return out_path.resolve()
-
-    # 2. Fall back to scraping the view page.
-    img_url = _scrape_view_page_for_image(opus_id)
-    if img_url:
-        data = _try_get(img_url)
-        if data:
-            out_path.write_bytes(data)
-            print(f"  [mugshot-nc] scraped → {img_url}", flush=True)
-            return out_path.resolve()
-
-    print(f"  [mugshot-nc] no photo found for OPUS {opus_id}", flush=True)
-    return None
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("usage: python -m production.local.mugshot_fetcher <OPUS_ID>")
-        sys.exit(1)
-    opus = sys.argv[1]
-    out = Path(f"/tmp/ncdps_mug_{opus}.jpg")
-    p = fetch_ncdps_mugshot(opus, out, force=True)
-    print(f"\nResult: {p}")
+        return out_path
+    print(f"  [mugshot-nc] fetching photo for OPUS {opus_id}")
+    url = _scrape_view_page_for_image(opus_id)
+    if not url:
+        print(f"  [mugshot-nc] no photo found for OPUS {opus_id}")
+        return None
+    print(f"  [mugshot-nc] scraped → {url}")
+    data = _try_get(url)
+    if not data:
+        print(f"  [mugshot-nc] no photo found for OPUS {opus_id}")
+        return None
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(data)
+    return out_path.resolve()
