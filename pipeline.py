@@ -76,6 +76,54 @@ def cmd_produce(args) -> int:
     return 0
 
 
+def cmd_buncombe_daily(args) -> int:
+    """Daily Buncombe County harvest. Downloads NCDPS bulk tables (using
+    If-Modified-Since to skip unchanged files), upserts new convictions
+    into research_output/ncdps/buncombe.db, and optionally builds +
+    renders a video for the newest unrendered record."""
+    from research.ncdps import buncombe_harvester, db as ncdb
+
+    conn = ncdb.connect()
+    summary = buncombe_harvester.harvest_buncombe(conn)
+    print(f"  ✓ Harvest: checked={summary['checked']:,} "
+          f"matched={summary['matched']:,} new={summary['new']} "
+          f"skipped_dupes={summary['skipped_dupes']}")
+    print(f"  DB stats: {ncdb.stats(conn)}")
+
+    if not args.render:
+        return 0
+
+    from production.local import scripter as local_scripter
+    from production.convo_video import produce_verdict_video
+
+    produced = 0
+    while produced < args.max_renders:
+        record = ncdb.most_recent_new(conn)
+        if not record:
+            print("  no new convictions to render.")
+            break
+        print(f"\n  → rendering {record['opus_id']} "
+              f"({record.get('last_name')}, {record.get('first_name')})")
+        try:
+            project_dir = local_scripter.write_project(
+                record, REPO_ROOT / "projects")
+            ncdb.set_status(conn, record["opus_id"],
+                            ncdb.STATUS_RENDERING, str(project_dir))
+            conn.commit()
+            out = produce_verdict_video(project_dir)
+            ncdb.set_status(conn, record["opus_id"], ncdb.STATUS_RENDERED,
+                            str(project_dir))
+            conn.commit()
+            print(f"  ✓ {out.get('output_path')}")
+            produced += 1
+        except Exception as e:
+            print(f"  ✗ render failed: {e}")
+            ncdb.set_status(conn, record["opus_id"], ncdb.STATUS_FAILED)
+            conn.commit()
+            raise
+    return 0
+
+
 def cmd_list(args) -> int:
     from research.indicted import db
     conn = db.connect()
@@ -115,6 +163,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--status", default="scored")
     p.add_argument("--limit", type=int, default=25)
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("buncombe-daily",
+                       help="Harvest Buncombe County convictions from "
+                            "NCDPS and emit the newest one's project dir.")
+    p.add_argument("--render", action="store_true",
+                   help="After harvesting, also produce a video for the "
+                        "newest unrendered conviction.")
+    p.add_argument("--max-renders", type=int, default=1,
+                   help="If --render, produce at most this many videos in "
+                        "one invocation (default 1).")
+    p.set_defaults(func=cmd_buncombe_daily)
 
     args = ap.parse_args(argv)
     return args.func(args)

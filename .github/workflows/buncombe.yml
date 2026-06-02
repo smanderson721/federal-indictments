@@ -1,0 +1,98 @@
+name: buncombe
+
+# Daily Buncombe County, NC conviction video pipeline.
+#
+# Each run:
+#   1. Downloads (or refreshes via If-Modified-Since) the NCDPS bulk
+#      offender + court-commitment tables.
+#   2. Filters for Buncombe County (CMCOUNTY == BUNCOMBE) and upserts
+#      brand-new convictions into research_output/ncdps/buncombe.db.
+#   3. Picks the most-recent unrendered conviction and produces a
+#      1080x1920 vertical Short with mugshot + synthesized court docs.
+#   4. Commits the updated DB back to the repo so future runs know
+#      which OPUS IDs have already been processed.
+#   5. Uploads the mp4 + script.json + case_file.json as an artifact
+#      named `buncombe-<run_id>`.
+#
+# The local pitches.html sync poller picks the artifact up automatically.
+
+on:
+  schedule:
+    # 06:00 UTC daily (~01:00 ET) — after NCDPS overnight refresh.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_renders:
+        description: "Max videos to render in this run (default 1)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: buncombe
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg fonts-liberation fonts-dejavu fonts-noto-color-emoji
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Node deps + Puppeteer Chromium
+        working-directory: d3_scenes
+        run: |
+          npm install --no-audit --no-fund
+          node -e "import('puppeteer').then(p => p.default.executablePath()).then(console.log)"
+
+      - name: Harvest + render newest Buncombe conviction
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python pipeline.py buncombe-daily \
+            --render \
+            --max-renders ${{ github.event.inputs.max_renders || '1' }}
+
+      - name: Commit updated NCDPS state DB
+        run: |
+          if [[ -n $(git status --porcelain research_output/ncdps/buncombe.db) ]]; then
+            git config user.name  "buncombe-bot"
+            git config user.email "buncombe-bot@users.noreply.github.com"
+            git add research_output/ncdps/buncombe.db
+            git commit -m "buncombe: state update from run $GITHUB_RUN_ID"
+            git push
+          else
+            echo "No DB changes to commit."
+          fi
+
+      - name: Upload mp4 + script artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buncombe-${{ github.run_id }}
+          path: |
+            projects/buncombe-*/*.mp4
+            projects/buncombe-*/script.json
+            projects/buncombe-*/case_file.json
+          retention-days: 14
+          if-no-files-found: ignore

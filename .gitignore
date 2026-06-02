@@ -9,9 +9,14 @@ projects/**/visuals/
 projects/**/audio/
 projects/**/*.mp4
 projects/**/_frames_*/
+artifacts/
 
 # DB lives in workflow runner; don't commit local DB
 research_output/
+# ...except the Buncombe state DB, which the daily workflow commits back
+# so cron runs know which OPUS IDs are already processed.
+!research_output/ncdps/
+!research_output/ncdps/buncombe.db
 
 # Node
 d3_scenes/node_modules/

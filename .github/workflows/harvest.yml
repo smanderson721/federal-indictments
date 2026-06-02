@@ -1,12 +1,10 @@
 name: harvest
 
-# Polls federal news feeds every 6 hours, scores new events with Gemini,
-# and commits the updated SQLite DB back to the repo so the render
-# workflow (and your local pitches.html) can see the latest events.
+# DEPRECATED — federal indictment pipeline is benched.
+# Cron disabled; only runnable manually via workflow_dispatch.
+# See .github/workflows/buncombe.yml for the active pipeline.
 
 on:
-  schedule:
-    - cron: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
   workflow_dispatch:
 
 permissions:
