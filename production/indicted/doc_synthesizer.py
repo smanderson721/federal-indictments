@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 
-# ── Font discovery (macOS-friendly) ───────────────────────────────
+# ── Font discovery (macOS + Ubuntu/Linux runners) ────────────────
 def _font(size: int, bold: bool = False, mono: bool = False) -> ImageFont.FreeTypeFont:
     candidates = []
     if mono:
@@ -36,18 +36,29 @@ def _font(size: int, bold: bool = False, mono: bool = False) -> ImageFont.FreeTy
             "/System/Library/Fonts/Menlo.ttc",
             "/System/Library/Fonts/Courier.ttc",
             "/System/Library/Fonts/Monaco.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationMono-Regular.ttf",
         ]
     elif bold:
         candidates = [
             "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf",
             "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         ]
     else:
         candidates = [
             "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
             "/System/Library/Fonts/Supplemental/Georgia.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         ]
     for path in candidates:
         if Path(path).exists():

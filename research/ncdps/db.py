@@ -29,6 +29,8 @@ STATUS_RENDERING = "rendering"
 STATUS_RENDERED  = "rendered"
 STATUS_FAILED    = "failed"
 STATUS_SKIPPED   = "skipped"
+STATUS_NO_PHOTO  = "skipped_no_photo"
+STATUS_NO_CODE   = "skipped_unknown_offense"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS convictions (

@@ -80,8 +80,11 @@ def cmd_buncombe_daily(args) -> int:
     """Daily Buncombe County harvest. Downloads NCDPS bulk tables (using
     If-Modified-Since to skip unchanged files), upserts new convictions
     into research_output/ncdps/buncombe.db, and optionally builds +
-    renders a video for the newest unrendered record."""
+    renders a video for the newest unrendered record. When a record is
+    unrenderable (no real mugshot, or offense code not in our lookup),
+    it is marked skipped in the DB and the next-newest is attempted."""
     from research.ncdps import buncombe_harvester, db as ncdb
+    from production.local.scripter import SkipCase
 
     conn = ncdb.connect()
     summary = buncombe_harvester.harvest_buncombe(conn)
@@ -97,16 +100,33 @@ def cmd_buncombe_daily(args) -> int:
     from production.convo_video import produce_verdict_video
 
     produced = 0
-    while produced < args.max_renders:
+    attempts = 0
+    # Cap the number of advance-on-skip attempts per run so an unusually
+    # bad day can't burn the workflow's timeout chasing dead-end records.
+    max_attempts = 25
+
+    while produced < args.max_renders and attempts < max_attempts:
+        attempts += 1
         record = ncdb.most_recent_new(conn)
         if not record:
-            print("  no new convictions to render.")
+            print("  no more new convictions to render.")
             break
-        print(f"\n  → rendering {record['opus_id']} "
-              f"({record.get('last_name')}, {record.get('first_name')})")
+        print(f"\n  → attempt {attempts}: {record['opus_id']} "
+              f"({record.get('last_name')}, {record.get('first_name')}) "
+              f"offense={record.get('most_serious_offense_code')!r}")
         try:
             project_dir = local_scripter.write_project(
                 record, REPO_ROOT / "projects")
+        except SkipCase as sk:
+            print(f"  ⊘ skipping: {sk}", flush=True)
+            status = (ncdb.STATUS_NO_PHOTO if sk.reason == "no_photo"
+                      else ncdb.STATUS_NO_CODE if sk.reason == "unknown_offense"
+                      else ncdb.STATUS_SKIPPED)
+            ncdb.set_status(conn, record["opus_id"], status)
+            conn.commit()
+            continue
+
+        try:
             ncdb.set_status(conn, record["opus_id"],
                             ncdb.STATUS_RENDERING, str(project_dir))
             conn.commit()
@@ -121,6 +141,7 @@ def cmd_buncombe_daily(args) -> int:
             ncdb.set_status(conn, record["opus_id"], ncdb.STATUS_FAILED)
             conn.commit()
             raise
+    print(f"\n  done: produced={produced} attempts={attempts}")
     return 0
 
 

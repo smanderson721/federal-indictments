@@ -46,13 +46,27 @@ def _try_get(url: str, timeout: float = 20.0) -> bytes | None:
             if r.status_code != 200:
                 return None
             ctype = r.headers.get("content-type", "").lower()
-            # Accept image responses only
+            # Accept image responses only.
             if not ctype.startswith("image/"):
                 return None
-            return r.content
+            data = r.content
+            # Reject NCDPS's silhouette placeholder (served when no photo
+            # exists, e.g. for juvenile offenders). It's a small GIF.
+            if len(data) < 4000 and (data[:6] == b"GIF89a"
+                                     or data[:6] == b"GIF87a"):
+                return None
+            return data
     except Exception as e:
         print(f"  [mugshot-nc] GET {url} failed: {e}", flush=True)
         return None
+
+
+def _is_silhouette(src: str) -> bool:
+    s = src.lower()
+    return ("silhouette" in s
+            or "spacertbl" in s   # NCDPS layout spacer image
+            or s.endswith("/find.ico")
+            or s.endswith(".gif"))   # all real mugshots are JPEG
 
 
 def _scrape_view_page_for_image(opus_id: str) -> Optional[str]:
@@ -67,20 +81,30 @@ def _scrape_view_page_for_image(opus_id: str) -> Optional[str]:
         print(f"  [mugshot-nc] view page fetch failed: {e}", flush=True)
         return None
 
-    # Look for any <img src> referencing the opus id or "photo"
+    # Look for any <img src> referencing the opus id or "photo".
+    # We deliberately skip silhouette / spacer / icon images so that
+    # juvenile / no-photo offenders return None and the case can be
+    # filtered out upstream.
     candidates = re.findall(r'<img[^>]+src="([^"]+)"', html, re.IGNORECASE)
     for src in candidates:
-        if (opus_id in src
-                or "photo" in src.lower()
-                or "offender" in src.lower()
-                or "mug" in src.lower()):
-            if src.startswith("//"):
-                src = "https:" + src
-            elif src.startswith("/"):
-                src = "https://webapps.doc.state.nc.us" + src
-            elif not src.startswith("http"):
-                src = "https://webapps.doc.state.nc.us/opi/" + src.lstrip("./")
-            return src
+        if _is_silhouette(src):
+            continue
+        looks_like_photo = (
+            opus_id in src
+            or "dopPicture" in src
+            or "photo" in src.lower()
+            or "/offphoto" in src.lower()
+            or "mug" in src.lower()
+        )
+        if not looks_like_photo:
+            continue
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("/"):
+            src = "https://webapps.doc.state.nc.us" + src
+        elif not src.startswith("http"):
+            src = "https://webapps.doc.state.nc.us/opi/" + src.lstrip("./")
+        return src
     return None
 
 
