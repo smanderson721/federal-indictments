@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Render artifacts — never commit these.
+projects/**/visuals/
+projects/**/audio/
+projects/**/*.mp4
+projects/**/_frames_*/
+
+# DB lives in workflow runner; don't commit local DB
+research_output/
+
+# Node
+d3_scenes/node_modules/
+d3_scenes/_temp_*.html
+d3_scenes/*.js.orig

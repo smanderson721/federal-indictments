@@ -1,0 +1,92 @@
+name: render
+
+# Renders one Verdict Short end-to-end and uploads the mp4 as a workflow
+# artifact. Triggered manually (or via REST API from pitches.html) with
+# either an event_id (auto-research + script + render) or a project_dir
+# (skip straight to render).
+
+on:
+  workflow_dispatch:
+    inputs:
+      event_id:
+        description: "Event ID from crime.db (leave blank if project_dir given)"
+        required: false
+        type: string
+      project_dir:
+        description: "Existing projects/<slug> dir (skip research+script)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-${{ github.event.inputs.event_id || github.event.inputs.project_dir }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg fonts-liberation fonts-dejavu fonts-noto-color-emoji
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Node deps + Puppeteer Chromium
+        working-directory: d3_scenes
+        run: |
+          npm install --no-audit --no-fund
+          # Puppeteer downloads its own Chromium on install; ensure it's there
+          node -e "import('puppeteer').then(p => p.default.executablePath()).then(console.log)"
+
+      - name: Research + script (only if event_id given)
+        if: ${{ github.event.inputs.event_id != '' && github.event.inputs.project_dir == '' }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python pipeline.py research --event-id ${{ github.event.inputs.event_id }}
+          # Discover the project dir the researcher created for this event.
+          PROJECT_DIR=$(python -c "
+          import sqlite3
+          conn = sqlite3.connect('research_output/indicted/crime.db')
+          row = conn.execute('SELECT case_id FROM events WHERE id = ?', (${{ github.event.inputs.event_id }},)).fetchone()
+          assert row and row[0], 'researcher did not assign case_id'
+          print('projects/' + row[0])
+          ")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          python pipeline.py script "$PROJECT_DIR" --stage both
+
+      - name: Set PROJECT_DIR (project_dir input branch)
+        if: ${{ github.event.inputs.project_dir != '' }}
+        run: echo "PROJECT_DIR=${{ github.event.inputs.project_dir }}" >> "$GITHUB_ENV"
+
+      - name: Produce Short
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+        run: python pipeline.py produce "$PROJECT_DIR"
+
+      - name: Upload mp4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verdict-short-${{ github.run_id }}
+          path: ${{ env.PROJECT_DIR }}/*.mp4
+          retention-days: 7
+          if-no-files-found: error

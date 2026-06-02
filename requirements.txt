@@ -1,0 +1,7 @@
+# The Verdict — Python deps
+google-genai>=1.0
+requests>=2.32
+httpx>=0.27
+feedparser>=6.0
+pydantic>=2.6
+Pillow>=10.0

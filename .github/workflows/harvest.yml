@@ -1,0 +1,54 @@
+name: harvest
+
+# Polls federal news feeds every 6 hours, scores new events with Gemini,
+# and commits the updated SQLite DB back to the repo so the render
+# workflow (and your local pitches.html) can see the latest events.
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # 00:00, 06:00, 12:00, 18:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to commit the updated DB
+
+concurrency:
+  group: harvest
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Harvest feeds
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python pipeline.py harvest
+
+      - name: Score new events
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python pipeline.py score --limit 200 --top 15
+
+      - name: Commit updated DB
+        run: |
+          if [ -n "$(git status --porcelain research_output/indicted/crime.db 2>/dev/null)" ]; then
+            git config user.name "verdict-bot"
+            git config user.email "verdict-bot@users.noreply.github.com"
+            git add -f research_output/indicted/crime.db
+            git commit -m "harvest: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          else
+            echo "No DB changes to commit."
+          fi

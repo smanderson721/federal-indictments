@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #0a0a12; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/*
+ * vertical_indicted.html — 9:16 (1080×1920) scene template for the
+ *   The Verdict federal-crime YouTube Shorts pipeline (@TheVerdict_USA).
+ *
+ * Layouts (set via config.layout):
+ *
+ *   "breaking_intro"
+ *      Opening title card. Red "BREAKING" banner top, large headline,
+ *      defendant name + role, agency badge bottom.
+ *      Config: agency, headline, defendant_name, defendant_role,
+ *              defendant_location, status_tag ("INDICTED" | "PLEADED GUILTY"
+ *              | "SENTENCED" | "ARRESTED" | "CHARGED")
+ *
+ *   "doc_screenshot"
+ *      Show a press-release / indictment screenshot with a highlighted
+ *      passage and a typewriter caption.
+ *      Config: image_path (absolute or file://), image_caption,
+ *              highlight {x, y, w, h}  (normalized 0-1 over the image),
+ *              quote (text to type out), source_label (e.g. "Indictment,
+ *              U.S. v. Bolton, Doc. 1, page 4")
+ *
+ *   "mugshot_card"
+ *      Defendant photo, name banner, charges list, presumption-of-
+ *      innocence footer when alleged_only.
+ *      Config: image_path, defendant_name, charges[] (strings),
+ *              alleged_only (bool), location, source_credit
+ *
+ *   "street_view"
+ *      Slow Ken-Burns push on a static Street View image with a
+ *      location pin label.
+ *      Config: image_path, location_label, event_label (e.g.
+ *              "Federal courthouse — Greenbelt, MD"), date_label
+ *
+ *   "quote_card"
+ *      Editorial pull-quote from indictment / press release text.
+ *      Config: quote, attribution
+ *
+ *   "takeaway"
+ *      Closing card. Big sentence + a status footer + channel mark.
+ *      Config: text, footer (e.g. "developing story" / "case continues"),
+ *              channel_handle (default "@TheVerdict_USA")
+ *
+ * Renderer contract (consumed by d3_scenes/render_scene.js):
+ *   window._rendererReady = true
+ *   window._renderFrame(frameIndex)
+ *
+ * Config injection: the host renderer replaces the placeholder token on
+ * the line below with a JSON string. resolution + fps + duration are
+ * part of that JSON. (The token name is not repeated in this comment
+ * to keep first-match string replacement working correctly.)
+ */
+
+const C = __CONFIG_JSON__;
+const W = C.resolution[0];
+const H = C.resolution[1];
+const FPS = C.fps;
+const DUR = C.duration;
+const TOTAL = Math.ceil(DUR * FPS);
+const LAYOUT = (C.layout || "breaking_intro").toLowerCase();
+
+const canvas = document.getElementById("c");
+canvas.width = W;
+canvas.height = H;
+const ctx = canvas.getContext("2d");
+
+// ── Palette (newsroom-dark, red accent for breaking, gold for chapters) ──
+const P = {
+  bg:        "#0a0a12",
+  bg2:       "#15151f",
+  panel:     "#1c1c28",
+  border:    "#33334a",
+  text:      "#f1f1f5",
+  dim:       "#9c9caf",
+  faint:     "#5b5b70",
+  red:       "#dc2626",
+  redDeep:   "#991b1b",
+  amber:     "#d97706",
+  green:     "#16a34a",
+  // Per-channel accent override possible:
+  accent:    C.accent || "#dc2626",
+};
+const FONT = '"Helvetica Neue", "Inter", "SF Pro Display", system-ui, sans-serif';
+const FONT_MONO = '"SF Mono", "JetBrains Mono", Consolas, monospace';
+
+// ── Easing + math helpers ──
+const clamp01 = t => Math.max(0, Math.min(1, t));
+const smoothstep = t => { t = clamp01(t); return t * t * (3 - 2 * t); };
+const remap = (t, a, b) => clamp01((t - a) / (b - a));
+const easeOutCubic = t => 1 - Math.pow(1 - clamp01(t), 3);
+const easeInOutQuad = t => { t = clamp01(t); return t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2; };
+
+function fontSpec(weight, size) { return `${weight} ${size}px ${FONT}`; }
+function monoSpec(weight, size) { return `${weight} ${size}px ${FONT_MONO}`; }
+
+// Word-wrap returning array of lines respecting maxWidth.
+function wrap(text, maxWidth, fSpec) {
+  if (!text) return [];
+  ctx.save();
+  ctx.font = fSpec;
+  const words = String(text).split(/\s+/);
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (ctx.measureText(test).width > maxWidth && cur) {
+      lines.push(cur);
+      cur = w;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur);
+  ctx.restore();
+  return lines;
+}
+
+// Rounded rect path helper.
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// Draw text at (x,y) with alpha + optional vertical rise offset.
+function drawText(text, x, y, fSpec, color, alpha, align, rise) {
+  if (!text || alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.font = fSpec;
+  ctx.textAlign = align || "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(text, x, y + (rise || 0));
+  ctx.restore();
+}
+
+function drawWrapped(lines, x, y, fSpec, color, alpha, align, lineHeight, rise) {
+  for (let i = 0; i < lines.length; i++) {
+    drawText(lines[i], x, y + i * lineHeight, fSpec, color, alpha, align, rise);
+  }
+}
+
+// ── Async image loader ──
+// Templates that take an image_path preload it during init.
+// We expose a loaded promise + an `_imageReady` flag.
+let bgImage = null;
+let bgImageState = "idle";   // idle | loading | ready | error
+
+function loadImage(src) {
+  return new Promise(resolve => {
+    if (!src) { resolve(null); return; }
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    // Absolute filesystem path? Rewrite to a same-origin HTTP URL so
+    // the headless browser (loaded over http://localhost:49023) doesn't
+    // hit Chromium's file:// → http:// cross-origin block.
+    if (/^\//.test(src)) {
+      const m = src.match(/\/projects\/.*/);
+      if (m) {
+        src = m[0];   // becomes e.g. /projects/<slug>/visuals/source_images/x.jpg
+      } else {
+        src = "file://" + src;
+      }
+    }
+    img.src = src;
+  });
+}
+
+// Used by image-bearing layouts when image is missing/failed.
+// Visibly distinct from background so previews/placeholders read clearly.
+function drawPlaceholder(x, y, w, h, label) {
+  ctx.save();
+  // Lighter solid fill so placeholder is obvious against bg
+  ctx.fillStyle = "#2a2a3a";
+  rrect(x, y, w, h, 18); ctx.fill();
+  // Diagonal stripes for unmistakable "missing asset" look
+  ctx.save();
+  rrect(x, y, w, h, 18); ctx.clip();
+  ctx.strokeStyle = "rgba(255,255,255,0.05)";
+  ctx.lineWidth = 28;
+  for (let s = -h; s < w + h; s += 70) {
+    ctx.beginPath();
+    ctx.moveTo(x + s, y);
+    ctx.lineTo(x + s + h, y + h);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // Bright amber dashed border
+  ctx.strokeStyle = P.amber;
+  ctx.lineWidth = 3;
+  ctx.setLineDash([14, 10]);
+  rrect(x, y, w, h, 18); ctx.stroke();
+  ctx.setLineDash([]);
+  // Center icon: simple framed-image glyph
+  const cxp = x + w / 2;
+  const cyp = y + h / 2 - 40;
+  ctx.strokeStyle = P.dim;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(cxp - 60, cyp - 45, 120, 90);
+  ctx.beginPath();
+  ctx.moveTo(cxp - 60, cyp + 20);
+  ctx.lineTo(cxp - 20, cyp - 10);
+  ctx.lineTo(cxp + 10, cyp + 15);
+  ctx.lineTo(cxp + 30, cyp - 5);
+  ctx.lineTo(cxp + 60, cyp + 25);
+  ctx.stroke();
+  ctx.fillStyle = P.dim;
+  ctx.beginPath();
+  ctx.arc(cxp + 30, cyp - 25, 8, 0, Math.PI * 2);
+  ctx.fill();
+  // Label
+  ctx.fillStyle = P.text;
+  ctx.font = fontSpec(700, 34);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText((label || "image pending").toUpperCase(), cxp, y + h / 2 + 50);
+  ctx.fillStyle = P.amber;
+  ctx.font = fontSpec(600, 22);
+  ctx.fillText("PRODUCER WILL FETCH AT RENDER TIME", cxp, y + h / 2 + 90);
+  ctx.restore();
+}
+
+// ── Background: subtle vignette + film grain + drifting particles ──
+const particles = [];
+for (let i = 0; i < 90; i++) {
+  particles.push({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: 0.6 + Math.random() * 1.6,
+    vx: (Math.random() - 0.5) * 0.12,
+    vy: -(0.04 + Math.random() * 0.18),
+    alpha: 0.04 + Math.random() * 0.15,
+  });
+}
+
+function drawBg(tSec, tintHex) {
+  ctx.fillStyle = P.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Diagonal radial tint biased toward top.
+  const cx = W * 0.5, cy = H * 0.30;
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, H * 0.65);
+  const hex = tintHex || P.accent;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  grad.addColorStop(0,    `rgba(${r},${g},${b},0.10)`);
+  grad.addColorStop(0.5,  "rgba(21,21,31,0.20)");
+  grad.addColorStop(1,    "rgba(10,10,18,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const p of particles) {
+    const px = ((p.x + p.vx * tSec * FPS) % W + W) % W;
+    const py = ((p.y + p.vy * tSec * FPS) % H + H) % H;
+    ctx.save();
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = P.border;
+    ctx.beginPath();
+    ctx.arc(px, py, p.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Channel chip drawn small in lower-right corner of every layout ──
+function drawChannelChip(alpha) {
+  if (alpha <= 0) return;
+  const pad = 36;
+  const label = (C.channel_handle || "@TheVerdict_USA").toUpperCase();
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = fontSpec(700, 22);
+  ctx.textAlign = "right";
+  ctx.textBaseline = "alphabetic";
+  // small red square + label
+  const tw = ctx.measureText(label).width;
+  const x = W - pad;
+  const y = H - pad;
+  ctx.fillStyle = P.red;
+  rrect(x - tw - 32, y - 28, 18, 18, 3);
+  ctx.fill();
+  ctx.fillStyle = P.text;
+  ctx.fillText(label, x, y - 14);
+  ctx.restore();
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: breaking_intro                                         ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutBreakingIntro(tNorm, tSec) {
+  // ── 1. Top BREAKING banner slides down ──
+  const bannerY = -120 + 120 * easeOutCubic(remap(tNorm, 0.0, 0.25));
+  ctx.save();
+  ctx.fillStyle = P.red;
+  ctx.fillRect(0, bannerY, W, 120);
+  // diagonal stripe accent
+  ctx.fillStyle = P.redDeep;
+  ctx.beginPath();
+  ctx.moveTo(0, bannerY + 120);
+  ctx.lineTo(W, bannerY + 100);
+  ctx.lineTo(W, bannerY + 120);
+  ctx.closePath();
+  ctx.fill();
+  // pulsing dot
+  const pulseR = 14 + 4 * Math.sin(tSec * 6);
+  ctx.fillStyle = "#ffffff";
+  ctx.globalAlpha = 0.85 + 0.15 * Math.sin(tSec * 6);
+  ctx.beginPath();
+  ctx.arc(60, bannerY + 60, pulseR, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = fontSpec(900, 56);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText("BREAKING", 110, bannerY + 60);
+  // agency / right side
+  if (C.agency) {
+    ctx.font = fontSpec(700, 28);
+    ctx.textAlign = "right";
+    ctx.fillText(C.agency.toUpperCase(), W - 40, bannerY + 60);
+  }
+  ctx.restore();
+
+  // ── 2. Status tag (e.g. INDICTED) ──
+  const tagAlpha = smoothstep(remap(tNorm, 0.18, 0.40));
+  const tag = (C.status_tag || "INDICTED").toUpperCase();
+  ctx.save();
+  ctx.globalAlpha = tagAlpha;
+  ctx.font = fontSpec(800, 36);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const tagW = ctx.measureText(tag).width + 48;
+  ctx.fillStyle = P.red;
+  rrect(80, 250, tagW, 64, 8);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(tag, 104, 282);
+  ctx.restore();
+
+  // ── 3. Headline (large, wrapped) ──
+  const headAlpha = smoothstep(remap(tNorm, 0.25, 0.55));
+  const headRise = (1 - headAlpha) * 30;
+  const headSize = 88;
+  const headlineFont = fontSpec(800, headSize);
+  const headLines = wrap(C.headline || "", W - 160, headlineFont);
+  const lh = headSize * 1.08;
+  let y = 420;
+  drawWrapped(headLines, 80, y, headlineFont, P.text, headAlpha, "left", lh, headRise);
+  y += headLines.length * lh;
+
+  // ── 4. Defendant name card ──
+  const nameAlpha = smoothstep(remap(tNorm, 0.45, 0.70));
+  const nameRise = (1 - nameAlpha) * 30;
+  if (C.defendant_name) {
+    y += 80;
+    // red left bar
+    ctx.save();
+    ctx.globalAlpha = nameAlpha;
+    ctx.fillStyle = P.red;
+    ctx.fillRect(80, y + nameRise - 60, 8, 200);
+    ctx.restore();
+
+    drawText(C.defendant_name, 120, y + 10, fontSpec(800, 64),
+             P.text, nameAlpha, "left", nameRise);
+    if (C.defendant_role) {
+      drawText(C.defendant_role, 120, y + 70,
+               fontSpec(500, 34), P.dim, nameAlpha, "left", nameRise);
+    }
+    if (C.defendant_location) {
+      drawText(C.defendant_location.toUpperCase(), 120, y + 120,
+               fontSpec(600, 26), P.faint, nameAlpha, "left", nameRise);
+    }
+  }
+
+  // ── 5. Lower scan-line ticker ──
+  const tickerAlpha = smoothstep(remap(tNorm, 0.55, 0.80));
+  ctx.save();
+  ctx.globalAlpha = tickerAlpha;
+  ctx.fillStyle = P.bg2;
+  ctx.fillRect(0, H - 140, W, 140);
+  ctx.fillStyle = P.red;
+  ctx.fillRect(0, H - 140, W, 4);
+  ctx.fillStyle = P.dim;
+  ctx.font = fontSpec(600, 28);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const ticker = (C.ticker || "FEDERAL INDICTMENT · CASE DEVELOPING · UNITED STATES").toUpperCase();
+  // Scrolling text
+  const scrollX = W - ((tSec * 80) % (ctx.measureText(ticker).width + W));
+  ctx.fillText(ticker, scrollX, H - 70);
+  ctx.restore();
+
+  drawChannelChip(smoothstep(remap(tNorm, 0.30, 0.50)));
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: doc_screenshot                                         ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutDocScreenshot(tNorm, tSec) {
+  // Image area: top 60% of frame.
+  const imgX = 80, imgY = 200;
+  const imgW = W - 160;
+  const imgH = Math.floor(H * 0.50);
+
+  // Header label
+  drawText((C.source_label || "Court document").toUpperCase(),
+           80, 130, fontSpec(700, 28), P.amber, 1.0, "left", 0);
+  // accent line
+  ctx.fillStyle = P.amber;
+  ctx.fillRect(80, 150, 60, 4);
+
+  // Image
+  ctx.save();
+  rrect(imgX, imgY, imgW, imgH, 12);
+  ctx.clip();
+  if (bgImageState === "ready" && bgImage) {
+    // Ken-Burns push toward the highlight rect
+    const hl = C.highlight || null;
+    const zoom = 1.0 + 0.08 * easeInOutQuad(tNorm);
+    const iw = bgImage.naturalWidth;
+    const ih = bgImage.naturalHeight;
+    // Default centered cover
+    const scale = Math.max(imgW / iw, imgH / ih) * zoom;
+    const drawW = iw * scale;
+    const drawH = ih * scale;
+    let dx = imgX + (imgW - drawW) / 2;
+    let dy = imgY + (imgH - drawH) / 2;
+    if (hl) {
+      // shift so highlight centroid drifts toward middle
+      const hcx = (hl.x + hl.w / 2);
+      const hcy = (hl.y + hl.h / 2);
+      const shiftX = (0.5 - hcx) * drawW * 0.5 * easeInOutQuad(tNorm);
+      const shiftY = (0.5 - hcy) * drawH * 0.5 * easeInOutQuad(tNorm);
+      dx += shiftX;
+      dy += shiftY;
+    }
+    ctx.drawImage(bgImage, dx, dy, drawW, drawH);
+
+    // Highlight rectangle (drawn after image)
+    if (hl) {
+      const hlAlpha = smoothstep(remap(tNorm, 0.20, 0.45));
+      const hx = dx + hl.x * drawW;
+      const hy = dy + hl.y * drawH;
+      const hw = hl.w * drawW;
+      const hh = hl.h * drawH;
+      ctx.save();
+      ctx.globalAlpha = hlAlpha * 0.35;
+      ctx.fillStyle = P.amber;
+      ctx.fillRect(hx, hy, hw, hh);
+      ctx.globalAlpha = hlAlpha;
+      ctx.strokeStyle = P.amber;
+      ctx.lineWidth = 4;
+      ctx.strokeRect(hx, hy, hw, hh);
+      ctx.restore();
+    }
+  } else {
+    drawPlaceholder(imgX, imgY, imgW, imgH, "press release image");
+  }
+  ctx.restore();
+
+  // Image caption beneath
+  if (C.image_caption) {
+    drawText(C.image_caption, W / 2, imgY + imgH + 50,
+             fontSpec(500, 26), P.dim, 1.0, "center", 0);
+  }
+
+  // Quote typewriter
+  if (C.quote) {
+    const qStart = 0.35;
+    const qProgress = remap(tNorm, qStart, 0.95);
+    const chars = Math.floor(C.quote.length * easeOutCubic(qProgress));
+    const visible = C.quote.slice(0, chars);
+    const quoteY = imgY + imgH + 130;
+    const quoteFont = fontSpec(600, 38);
+    const lines = wrap('"' + visible + (chars < C.quote.length ? "" : '"'),
+                       W - 160, quoteFont);
+    const lh = 50;
+    for (let i = 0; i < lines.length; i++) {
+      drawText(lines[i], 80, quoteY + i * lh,
+               quoteFont, P.text, 1.0, "left", 0);
+    }
+    // blinking cursor — pinned to the end of the last visible line
+    // (re-set ctx.font before measuring; drawText/save+restore leave
+    // ctx.font in whatever state preceded the layout call).
+    if (chars < C.quote.length) {
+      const cursorBlink = Math.floor(tSec * 2) % 2 === 0 ? 1 : 0;
+      if (cursorBlink) {
+        ctx.save();
+        ctx.font = quoteFont;
+        const lastLine = lines[lines.length - 1] || "";
+        const lastW = ctx.measureText(lastLine).width;
+        ctx.fillStyle = P.amber;
+        // Text starts at x=80; baseline is at quoteY + (lines.length-1)*lh.
+        ctx.fillRect(80 + lastW + 4,
+                     quoteY + (lines.length - 1) * lh - 34, 4, 38);
+        ctx.restore();
+      }
+    }
+  }
+
+  drawChannelChip(smoothstep(remap(tNorm, 0.30, 0.50)));
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: mugshot_card                                           ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutMugshotCard(tNorm, tSec) {
+  // Top portrait area: roughly 60% of vertical space.
+  const portX = 80, portY = 160;
+  const portW = W - 160;
+  const portH = Math.floor(H * 0.56);
+
+  ctx.save();
+  rrect(portX, portY, portW, portH, 18);
+  ctx.clip();
+  if (bgImageState === "ready" && bgImage) {
+    const iw = bgImage.naturalWidth, ih = bgImage.naturalHeight;
+    // Slight zoom in over the scene.
+    const zoom = 1.0 + 0.05 * easeInOutQuad(tNorm);
+    const scale = Math.max(portW / iw, portH / ih) * zoom;
+    const dw = iw * scale, dh = ih * scale;
+    const dx = portX + (portW - dw) / 2;
+    const dy = portY + (portH - dh) / 2;
+    ctx.drawImage(bgImage, dx, dy, dw, dh);
+
+    // Dark gradient at bottom for name banner legibility.
+    const g = ctx.createLinearGradient(portX, portY + portH - 280,
+                                        portX, portY + portH);
+    g.addColorStop(0, "rgba(10,10,18,0)");
+    g.addColorStop(1, "rgba(10,10,18,0.95)");
+    ctx.fillStyle = g;
+    ctx.fillRect(portX, portY + portH - 280, portW, 280);
+  } else {
+    drawPlaceholder(portX, portY, portW, portH, "defendant photo");
+  }
+  ctx.restore();
+
+  // Frame border
+  ctx.save();
+  ctx.strokeStyle = P.border;
+  ctx.lineWidth = 2;
+  rrect(portX, portY, portW, portH, 18); ctx.stroke();
+  ctx.restore();
+
+  // Name banner inside lower portion of portrait
+  const nameAlpha = smoothstep(remap(tNorm, 0.10, 0.35));
+  const name = C.defendant_name || "Unnamed";
+  drawText(name, portX + 30, portY + portH - 130,
+           fontSpec(800, 64), P.text, nameAlpha, "left", 0);
+  if (C.location) {
+    drawText(C.location.toUpperCase(), portX + 30, portY + portH - 80,
+             fontSpec(600, 26), P.dim, nameAlpha, "left", 0);
+  }
+  if (C.source_credit) {
+    drawText(C.source_credit, portX + portW - 30, portY + portH - 30,
+             fontSpec(400, 18), P.faint, nameAlpha, "right", 0);
+  }
+
+  // Charges list — slides up below the portrait. Each charge wraps to
+  // the card width so long titles ("10 counts - unlawful retention of
+  // national defense information") don't run off the right edge.
+  const chargesY = portY + portH + 60;
+  const charges = C.charges || [];
+  const chargeFont = fontSpec(500, 32);
+  const chargeTextX = 130;
+  const chargeMaxW = W - chargeTextX - 60;   // 60px right gutter
+  const chargeLH = 42;                       // per-line vertical step
+  const chargeGap = 22;                      // extra gap between charges
+  let chargeCursorY = chargesY;
+  for (let i = 0; i < charges.length && i < 5; i++) {
+    const lineAlpha = smoothstep(remap(tNorm, 0.30 + i * 0.10, 0.55 + i * 0.10));
+    const rise = (1 - lineAlpha) * 20;
+    const lines = wrap(charges[i], chargeMaxW, chargeFont);
+    // bullet aligned with first line of this charge
+    ctx.save();
+    ctx.globalAlpha = lineAlpha;
+    ctx.fillStyle = P.red;
+    ctx.beginPath();
+    ctx.arc(100, chargeCursorY - 12 + rise, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    for (let li = 0; li < lines.length; li++) {
+      drawText(lines[li], chargeTextX, chargeCursorY + li * chargeLH,
+               chargeFont, P.text, lineAlpha, "left", rise);
+    }
+    chargeCursorY += lines.length * chargeLH + chargeGap;
+    if (chargeCursorY > H - 200) break;   // never run into the bottom banner
+  }
+
+  // Presumption-of-innocence banner
+  if (C.alleged_only) {
+    const bannerAlpha = smoothstep(remap(tNorm, 0.60, 0.85));
+    ctx.save();
+    ctx.globalAlpha = bannerAlpha;
+    ctx.fillStyle = P.bg2;
+    ctx.fillRect(0, H - 130, W, 90);
+    ctx.fillStyle = P.amber;
+    ctx.fillRect(0, H - 130, W, 4);
+    ctx.fillStyle = P.dim;
+    ctx.font = fontSpec(600, 24);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Presumed innocent until proven guilty in a court of law.",
+                 W / 2, H - 85);
+    ctx.restore();
+  }
+
+  drawChannelChip(smoothstep(remap(tNorm, 0.30, 0.50)));
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: street_view                                            ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutStreetView(tNorm, tSec) {
+  // Full-frame street view with slow horizontal pan + slight zoom.
+  ctx.save();
+  if (bgImageState === "ready" && bgImage) {
+    const iw = bgImage.naturalWidth, ih = bgImage.naturalHeight;
+    const zoom = 1.10 + 0.06 * tNorm;
+    const scale = Math.max(W / iw, H / ih) * zoom;
+    const dw = iw * scale, dh = ih * scale;
+    const panX = -((dw - W) * (0.3 + 0.4 * tNorm));   // gentle left→right
+    const dy = (H - dh) / 2;
+    ctx.drawImage(bgImage, panX, dy, dw, dh);
+  } else {
+    drawPlaceholder(0, 0, W, H, "street view image");
+  }
+  ctx.restore();
+
+  // Top + bottom dark gradients
+  const tg = ctx.createLinearGradient(0, 0, 0, 350);
+  tg.addColorStop(0, "rgba(10,10,18,0.80)");
+  tg.addColorStop(1, "rgba(10,10,18,0)");
+  ctx.fillStyle = tg; ctx.fillRect(0, 0, W, 350);
+
+  const bg = ctx.createLinearGradient(0, H - 480, 0, H);
+  bg.addColorStop(0, "rgba(10,10,18,0)");
+  bg.addColorStop(1, "rgba(10,10,18,0.92)");
+  ctx.fillStyle = bg; ctx.fillRect(0, H - 480, W, 480);
+
+  // Pin label top-left (animated drop-in)
+  const pinAlpha = smoothstep(remap(tNorm, 0.05, 0.25));
+  const pinRise = (1 - pinAlpha) * -30;
+  drawText("◉ LOCATION", 80, 130, fontSpec(700, 24),
+           P.red, pinAlpha, "left", pinRise);
+  if (C.location_label) {
+    drawText(C.location_label, 80, 180,
+             fontSpec(800, 56), P.text, pinAlpha, "left", pinRise);
+  }
+
+  // Event + date bottom-left
+  const evAlpha = smoothstep(remap(tNorm, 0.25, 0.50));
+  const evRise = (1 - evAlpha) * 30;
+  if (C.event_label) {
+    drawText(C.event_label, 80, H - 280,
+             fontSpec(700, 40), P.text, evAlpha, "left", evRise);
+  }
+  if (C.date_label) {
+    drawText(C.date_label.toUpperCase(), 80, H - 220,
+             fontSpec(600, 28), P.amber, evAlpha, "left", evRise);
+  }
+
+  drawChannelChip(smoothstep(remap(tNorm, 0.30, 0.50)));
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: quote_card                                             ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutQuoteCard(tNorm, tSec) {
+  // Massive open-quote glyph rising in
+  const glyphAlpha = smoothstep(remap(tNorm, 0.05, 0.30));
+  ctx.save();
+  ctx.globalAlpha = glyphAlpha * 0.30;
+  ctx.fillStyle = P.amber;
+  ctx.font = fontSpec(900, 380);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText("\u201C", 60, 480);
+  ctx.restore();
+
+  // Quote body
+  const quoteAlpha = smoothstep(remap(tNorm, 0.15, 0.55));
+  const rise = (1 - quoteAlpha) * 30;
+  const quote = C.quote || "";
+  const fSpec = fontSpec(600, 52);
+  const lines = wrap(quote, W - 200, fSpec);
+  const lh = 70;
+  const totalH = lines.length * lh;
+  const startY = (H - totalH) / 2;
+  drawWrapped(lines, 100, startY, fSpec, P.text, quoteAlpha, "left", lh, rise);
+
+  // Attribution
+  if (C.attribution) {
+    const attrAlpha = smoothstep(remap(tNorm, 0.50, 0.80));
+    const yAttr = startY + totalH + 80;
+    // amber underline
+    ctx.save();
+    ctx.globalAlpha = attrAlpha;
+    ctx.fillStyle = P.amber;
+    ctx.fillRect(100, yAttr - 30, 80, 4);
+    ctx.restore();
+    drawText("— " + C.attribution, 200, yAttr,
+             fontSpec(500, 30), P.dim, attrAlpha, "left", 0);
+  }
+
+  drawChannelChip(smoothstep(remap(tNorm, 0.30, 0.50)));
+}
+
+// ╔════════════════════════════════════════════════════════════════╗
+// ║  Layout: takeaway                                               ║
+// ╚════════════════════════════════════════════════════════════════╝
+function layoutTakeaway(tNorm, tSec) {
+  // Big text centered, footer + channel mark.
+  const text = C.text || "";
+  const fSpec = fontSpec(700, 64);
+  const lines = wrap(text, W - 160, fSpec);
+  const lh = 88;
+  const totalH = lines.length * lh;
+  const startY = (H - totalH) / 2 - 40;
+
+  // Each line rises with stagger.
+  for (let i = 0; i < lines.length; i++) {
+    const a = smoothstep(remap(tNorm, 0.10 + i * 0.08, 0.40 + i * 0.08));
+    const rise = (1 - a) * 30;
+    drawText(lines[i], W / 2, startY + i * lh,
+             fSpec, P.text, a, "center", rise);
+  }
+
+  // Underline accent grows
+  const underAlpha = smoothstep(remap(tNorm, 0.45, 0.75));
+  const underW = 240 * easeOutCubic(remap(tNorm, 0.45, 0.85));
+  ctx.save();
+  ctx.globalAlpha = underAlpha;
+  ctx.fillStyle = P.red;
+  ctx.fillRect((W - underW) / 2, startY + totalH + 60, underW, 6);
+  ctx.restore();
+
+  // Footer text
+  if (C.footer) {
+    const fA = smoothstep(remap(tNorm, 0.55, 0.85));
+    drawText(C.footer.toUpperCase(), W / 2, startY + totalH + 130,
+             fontSpec(700, 28), P.amber, fA, "center", 0);
+  }
+
+  // Channel block
+  const cA = smoothstep(remap(tNorm, 0.60, 0.90));
+  ctx.save();
+  ctx.globalAlpha = cA;
+  ctx.font = fontSpec(800, 38);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const handle = (C.channel_handle || "@TheVerdict_USA");
+  ctx.fillStyle = P.text;
+  ctx.fillText(handle, W / 2, H - 140);
+  ctx.font = fontSpec(500, 22);
+  ctx.fillStyle = P.dim;
+  ctx.fillText("FEDERAL CASES · NEW EVERY DAY", W / 2, H - 100);
+  ctx.restore();
+}
+
+// ── Layout dispatch table ──
+const LAYOUTS = {
+  breaking_intro: layoutBreakingIntro,
+  doc_screenshot: layoutDocScreenshot,
+  mugshot_card:   layoutMugshotCard,
+  street_view:    layoutStreetView,
+  quote_card:     layoutQuoteCard,
+  takeaway:       layoutTakeaway,
+};
+
+// ── Frame entry point ──
+window._renderFrame = function (frameIndex) {
+  const tNorm = frameIndex / Math.max(1, TOTAL - 1);
+  const tSec = frameIndex / FPS;
+
+  // Tint based on layout (breaking = red, others use accent).
+  const tint = (LAYOUT === "breaking_intro" || LAYOUT === "mugshot_card")
+    ? P.red : P.accent;
+  drawBg(tSec, tint);
+
+  const fn = LAYOUTS[LAYOUT] || layoutTakeaway;
+  fn(tNorm, tSec);
+
+  // Final fade-out (last 8% of scene)
+  const fadeOut = remap(tNorm, 0.92, 1.0);
+  if (fadeOut > 0) {
+    ctx.save();
+    ctx.globalAlpha = fadeOut * 0.9;
+    ctx.fillStyle = P.bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+};
+
+// ── Init: preload image if needed, then mark ready ──
+(async function init() {
+  const imageRequired = ["doc_screenshot", "mugshot_card", "street_view"];
+  if (imageRequired.includes(LAYOUT) && C.image_path) {
+    bgImageState = "loading";
+    bgImage = await loadImage(C.image_path);
+    bgImageState = bgImage ? "ready" : "error";
+  }
+  window._rendererReady = true;
+  window._renderFrame(0);
+})();
+</script>
+</body>
+</html>

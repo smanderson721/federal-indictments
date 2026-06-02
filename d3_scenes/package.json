@@ -1,0 +1,12 @@
+{
+  "name": "d3-scene-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node render_scene.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0"
+  }
+}
