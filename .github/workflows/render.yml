@@ -68,7 +68,7 @@ jobs:
           conn = sqlite3.connect('research_output/indicted/crime.db')
           row = conn.execute('SELECT case_id FROM events WHERE id = ?', (${{ github.event.inputs.event_id }},)).fetchone()
           assert row and row[0], 'researcher did not assign case_id'
-          print('projects/' + row[0])
+          print('projects/crime-' + row[0])
           ")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           python pipeline.py script "$PROJECT_DIR" --stage both
