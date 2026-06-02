@@ -83,10 +83,13 @@ jobs:
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
         run: python pipeline.py produce "$PROJECT_DIR"
 
-      - name: Upload mp4 artifact
+      - name: Upload mp4 + script artifact
         uses: actions/upload-artifact@v4
         with:
           name: verdict-short-${{ github.run_id }}
-          path: ${{ env.PROJECT_DIR }}/*.mp4
+          path: |
+            ${{ env.PROJECT_DIR }}/*.mp4
+            ${{ env.PROJECT_DIR }}/script.json
+            ${{ env.PROJECT_DIR }}/case_file.json
           retention-days: 7
           if-no-files-found: error
