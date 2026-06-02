@@ -4,6 +4,12 @@
     "source": "Hand-curated from NCDPS published code patterns + NC General Statutes."
   },
 
+  "OTHER FELON":                        "Other Felony Offense",
+  "POSSESSION OF FIREARM BY FELON":     "Possession of a Firearm by a Felon",
+  "IDENTITY FRAUD/THEFT":               "Identity Fraud and Theft",
+  "OBT PROP BY FALSE PR/CHTS/SER":      "Obtaining Property by False Pretenses",
+  "FAIL/NOTFY CHG ADDR SEXOFF":         "Failure To Notify of an Address Change as a Sex Offender",
+
   "FIRST DEGREE MURDER":                "First-Degree Murder",
   "SECOND DEGREE MURDER":               "Second-Degree Murder",
   "FIRST DEG MURDER":                   "First-Degree Murder",
