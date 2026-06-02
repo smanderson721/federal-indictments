@@ -665,9 +665,22 @@ def produce_verdict_video(project_dir: str | Path,
     try:
         from production.indicted.image_resolver import resolve_images
         resolve_images(project_dir)
-        # Reload script with resolver-populated image_paths
+        # Reload only card.image_path fields from disk (resolve_images
+        # writes them back to script.json). Don't overwrite the whole
+        # in-memory script — that would clobber `duration` and
+        # `audio_path` set by _narrate_scenes.
         with open(script_path, "r", encoding="utf-8") as f:
-            script = json.load(f)
+            disk_script = json.load(f)
+        disk_by_id = {s.get("id"): s for s in disk_script.get("scenes", [])}
+        for s in script["scenes"]:
+            d = disk_by_id.get(s["id"])
+            if not d:
+                continue
+            d_card = d.get("card") or {}
+            if "image_path" in d_card:
+                s.setdefault("card", {})["image_path"] = d_card["image_path"]
+            if "image_paths" in d_card:
+                s.setdefault("card", {})["image_paths"] = d_card["image_paths"]
     except Exception as e:
         print(f"  ⚠ image resolver failed: {e} — proceeding with placeholders",
               flush=True)
