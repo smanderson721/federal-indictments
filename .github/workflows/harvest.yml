@@ -43,12 +43,14 @@ jobs:
 
       - name: Commit updated DB
         run: |
-          if [ -n "$(git status --porcelain research_output/indicted/crime.db 2>/dev/null)" ]; then
-            git config user.name "verdict-bot"
-            git config user.email "verdict-bot@users.noreply.github.com"
-            git add -f research_output/indicted/crime.db
+          git config user.name "verdict-bot"
+          git config user.email "verdict-bot@users.noreply.github.com"
+          # crime.db is gitignored (research_output/ pattern), so use -f and
+          # then ask `git diff --cached` whether anything was actually staged.
+          git add -f research_output/indicted/crime.db || true
+          if git diff --cached --quiet; then
+            echo "No DB changes to commit."
+          else
             git commit -m "harvest: $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
-          else
-            echo "No DB changes to commit."
           fi
