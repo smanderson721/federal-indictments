@@ -17,9 +17,10 @@ name: buncombe
 # The local pitches.html sync poller picks the artifact up automatically.
 
 on:
-  schedule:
-    # 06:00 UTC daily (~01:00 ET) — after NCDPS overnight refresh.
-    - cron: "0 6 * * *"
+  # schedule:
+  #   # 06:00 UTC daily (~01:00 ET) — after NCDPS overnight refresh.
+  #   # DISABLED — project on bench.
+  #   - cron: "0 6 * * *"
   workflow_dispatch:
     inputs:
       max_renders:
